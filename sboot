@@ -1,0 +1,95 @@
+#!/bin/sh
+
+set -e
+
+trap 'echo "Script exited at line $LINENO"; exit 1' ERR
+
+. "lib_common.sh"
+
+help() {
+cat << EOF
+${progname}: QEMU wrapper with database
+options:
+ -g [URI] [NAME] Sync URI and name it NAME
+ -c [NAME]       If not present create qcow2 file for NAME
+ -b [NAME]       Boot into NAME
+ -d [NAME]       Delete NAME
+ -l              List available vms
+ -h              Print this message and exit
+
+NOTE: the default directory is ~/.cache/sboot
+EOF
+exit 0
+}
+
+check_arguments() {
+	actual_argc="${1}"
+	expected_argc="${2}"
+	if [ "${actual_argc}" -ne "${expected_argc}" ]; then
+		invalid_use
+	fi
+}
+
+get_file() {
+	DIR="${OSDIR}"
+	if [ "${1}" = "--temporary" ]; then
+		DIR="${TMPDIR}" && shift
+	fi
+	FILENAME="${1}"
+	EXTENSION="${2}"
+
+	echo "${DIR}"/"${FILENAME}""${EXTENSION}"
+}
+
+[ $# -eq 0 ] && invalid_use
+
+OSDIR="${XDG_CACHE_HOME:-$HOME/.cache}/sboot"
+TMPDIR="/tmp/sboot"
+
+[ -d "${OSDIR}" ] || mkdir -pv "${OSDIR}"
+
+while getopts "g:c:b:d:lh" option; do
+	case "${option}" in
+	g)
+		check_arguments $# 3
+		check_program "curl"
+		URI="${1}"
+		OSNAME="${2}"
+		# FIXME: Does not check whether the installed file is an iso or not
+
+		OSFILE=$(get_file "${OSNAME}" .iso)
+		TMPFILE=$(get_file --temporary "${OSNAME}" .iso)
+
+		mkdir -p "$(dirname ${TMPFILE})"
+		curl -L "${URI}" -o "${TMPFILE}"
+
+		mkdir -pv "$(dirname ${OSFILE})"
+		mv "${TMPFILE}" "${OSFILE}"
+	;;
+	c)
+		check_arguments $# 2
+
+		QCOW2_FILE=$(get_file "${1}" .qcow2)
+		if [ -f "${QCOW2_FILE}" ]; then
+			echo file already exists: "${QCOW2_FILE}"
+		else
+			qemu-img create -f qcow2 "${QCOW2_FILE}" 20G
+		fi
+	;;
+	b)
+
+	;;
+	d) action="delete"
+		check_arguments $# 2
+		#FIXME: Not safe
+		rm -rf "${OSDIR}"/"${2}"
+	;;
+	l) action="list"
+		check_arguments $# 1
+		ls "${OSDIR}"
+	;;
+	h) help ;;
+
+	*) invalid_use -h ;;
+	esac
+done
