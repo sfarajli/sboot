@@ -2,6 +2,7 @@
 
 set -e
 
+# FIXME: DEBUG
 trap 'echo "Script exited at line $LINENO"; exit 1' ERR
 
 . "lib_common.sh"
@@ -9,23 +10,29 @@ trap 'echo "Script exited at line $LINENO"; exit 1' ERR
 help() {
 cat << EOF
 ${progname}: QEMU wrapper with database
-options:
- -g [URI] [NAME] Sync URI and name it NAME
- -c [NAME]       If not present create qcow2 file for NAME
- -b [NAME]       Boot into NAME
- -d [NAME]       Delete NAME
- -l              List available vms
- -h              Print this message and exit
+subcommands:
+  fetch  [OSNAME] [URI]   Sync URI and name it OSNAME
+  create [OSNAME]         Create qcow2 file for OSNAME
+  boot   [OSNAME] <first> Boot into OSNAME, if 'first' use the iso
+  remove [OSNAME]         Remove OSNAME
+  list                    List installed OSes
+  help                    Print this message and exit
 
-NOTE: the default directory is ~/.cache/sboot
+NOTE: OS directory is ~/.cache/sboot
 EOF
 exit 0
 }
 
+# FIXME: Shellcheck error
 check_arguments() {
-	actual_argc="${1}"
-	expected_argc="${2}"
-	if [ "${actual_argc}" -ne "${expected_argc}" ]; then
+	comparison="-ne"
+	if [ "${1}" = "--min" ]; then
+		comparison="-lt"
+	fi
+	actual_argc="${1}" && shift
+	expected_argc="${1}" && shift
+
+	if [ "${actual_argc}" "${comparison}" "${expected_argc}" ]; then
 		invalid_use
 	fi
 }
@@ -35,10 +42,10 @@ get_file() {
 	if [ "${1}" = "--temporary" ]; then
 		DIR="${TMPDIR}" && shift
 	fi
-	FILENAME="${1}"
+	OSFILE="${1}"
 	EXTENSION="${2}"
 
-	echo "${DIR}"/"${FILENAME}""${EXTENSION}"
+	echo "${DIR}"/"${OSFILE}"/"${OSFILE}""${EXTENSION}"
 }
 
 [ $# -eq 0 ] && invalid_use
@@ -46,50 +53,90 @@ get_file() {
 OSDIR="${XDG_CACHE_HOME:-$HOME/.cache}/sboot"
 TMPDIR="/tmp/sboot"
 
-[ -d "${OSDIR}" ] || mkdir -pv "${OSDIR}"
+if [ -d "${OSDIR}" ]; then
+	mkdir -pv "${OSDIR}"
+fi
 
-while getopts "g:c:b:d:lh" option; do
-	case "${option}" in
-	g)
-		check_arguments $# 3
-		check_program "curl"
-		URI="${1}"
-		OSNAME="${2}"
-		# FIXME: Does not check whether the installed file is an iso or not
+if [ "$#" -eq 0 ]; then
+	invalid_use
+fi
 
-		OSFILE=$(get_file "${OSNAME}" .iso)
-		TMPFILE=$(get_file --temporary "${OSNAME}" .iso)
+ACTION="${1}" && shift
 
-		mkdir -p "$(dirname ${TMPFILE})"
-		curl -L "${URI}" -o "${TMPFILE}"
+case "${ACTION}" in
+"fetch")
+	# FIXME: Does not check whether the installed file is an iso or not
+	check_arguments $# 2
+	check_program "curl"
+	OSNAME="${1}" && shift
+ 	URI="${1}" && shift
 
-		mkdir -pv "$(dirname ${OSFILE})"
+	OSFILE=$(get_file "${OSNAME}" .iso)
+	TMPFILE=$(get_file --temporary "${OSNAME}" .iso)
+
+	mkdir -p "$(dirname "${TMPFILE}")"
+	curl -L "${URI}" -o "${TMPFILE}"
+
+	mkdir -pv "$(dirname "${OSFILE}")"
 		mv "${TMPFILE}" "${OSFILE}"
 	;;
-	c)
-		check_arguments $# 2
+"create"|"boot")
+	# FIXME: Does not check argument overflow
+	check_arguments --min $# 1
+	check_program "qemu-img"
 
-		QCOW2_FILE=$(get_file "${1}" .qcow2)
-		if [ -f "${QCOW2_FILE}" ]; then
+	OSNAME="${1}" && shift
+	QCOW2_FILE=$(get_file "${OSNAME}" .qcow2)
+
+	if [ -f "${QCOW2_FILE}" ]; then
+		if [ "$ACTION" = "create" ]; then
 			echo file already exists: "${QCOW2_FILE}"
-		else
-			qemu-img create -f qcow2 "${QCOW2_FILE}" 20G
 		fi
-	;;
-	b)
+	else
+		qemu-img create -f qcow2 "${QCOW2_FILE}" 20G
+	fi
 
-	;;
-	d) action="delete"
-		check_arguments $# 2
-		#FIXME: Not safe
-		rm -rf "${OSDIR}"/"${2}"
-	;;
-	l) action="list"
-		check_arguments $# 1
-		ls "${OSDIR}"
-	;;
-	h) help ;;
+	if [ "${ACTION}" = "create" ]; then
+		exit
+	fi
 
-	*) invalid_use -h ;;
-	esac
-done
+	ISO_FILE=$(get_file "${OSNAME}" .iso)
+	if [ "${1}" = "first" ]; then
+		FLAGS="-cdrom "${ISO_FILE}" -boot d"
+		shift
+	fi
+
+	qemu-system-x86_64 \
+	  -enable-kvm \
+	  -m 2G \
+	  -smp 2 \
+	  -drive file=${QCOW2_FILE},format=qcow2 \
+	  -net nic -net user \
+	  ${FLAGS}
+	;;
+"remove")
+	check_arguments $# 1
+	OSDIR="${1}" && shift
+	QCOW2_FILE=$(get_file "${OSNAME}" .qcow2)
+	ISO_FILE=$(get_file "${OSNAME}" .iso)
+
+	if [ -f "${QCOW2_FILE}" ]; then
+		unlink "${QCOW2_FILE}"
+	fi
+
+	if [ -f "${ISO_FILE}" ]; then
+		unlink "${ISO_FILE}"
+	fi
+
+	if [ -d "${OSDIR}" ]; then
+		rmdir "${OSDIR}"
+	fi
+;;
+"list")
+	check_arguments $# 0
+	ls -1 "${OSDIR}" | nl
+;;
+"help") help ;;
+
+*) invalid_use -h ;;
+esac
