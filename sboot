@@ -1,142 +1,222 @@
 #!/bin/sh
 
-set -e
-
-# FIXME: DEBUG
-trap 'echo "Script exited at line $LINENO"; exit 1' ERR
-
 . "lib_common.sh"
 
 help() {
 cat << EOF
 ${progname}: QEMU wrapper with database
-subcommands:
-  fetch  [OSNAME] [URI]   Sync URI and name it OSNAME
-  create [OSNAME]         Create qcow2 file for OSNAME
-  boot   [OSNAME] <first> Boot into OSNAME, if 'first' use the iso
-  remove [OSNAME]         Remove OSNAME
-  list                    List installed OSes
-  help                    Print this message and exit
+ONLY supports x86_64
+Data directory: ~/.local/share/sboot
 
-NOTE: OS directory is ~/.cache/sboot
+USAGE:
+    ${progname} <COMMAND> [OPTIONS] [ARGS...]
+
+COMMANDS:
+    install  FILE             Install file (must be in correct format)
+    image    [OPTIONS] OS     Manage OS disk images
+    remove   [OPTIONS] OS     Remove OSes or files
+    boot     [OPTIONS] OS     Boot virtual machine
+    list                      List available OSes
+    help                      Show this message
+
+IMAGE OPTIONS:
+    -r SIZE                   Resize disk (e.g., 20G, +5G)
+    -c                        Create file
+
+BOOT OPTIONS:
+    -i FILE                   Boot from ISO file
+    -e ARGS                   Add extra QEMU arguments (append)
+    -a ARGS                   Overwrite all QEMU arguments (replace)
+
+REMOVE OPTIONS:
+    -f                        Silent
 EOF
 exit 0
 }
 
 # FIXME: Shellcheck error
+VMSDIR="$HOME/.local/share/sboot"
+
 check_arguments() {
 	comparison="-ne"
-	if [ "${1}" = "--min" ]; then
-		comparison="-lt"
-	fi
-	actual_argc="${1}" && shift
-	expected_argc="${1}" && shift
+	[ "$1" = "--min" ] && comparison="-lt"
+	actual_argc="$1"; shift
+	expected_argc="$1"; shift
 
-	if [ "${actual_argc}" "${comparison}" "${expected_argc}" ]; then
-		invalid_use
-	fi
+	[ "${actual_argc}" "${comparison}" "${expected_argc}" ] && invalid_use
 }
 
 get_file() {
-	DIR="${OSDIR}"
-	if [ "${1}" = "--temporary" ]; then
-		DIR="${TMPDIR}" && shift
-	fi
-	OSFILE="${1}"
-	EXTENSION="${2}"
+	DIRECTORY="$VMSDIR"
+	[ "$1" = "-t" ] && DIRECTORY="$TMPDIR" && shift
+	BASEVM="${1}"
+	FILE_EXTENSION="${2}"
 
-	echo "${DIR}"/"${OSFILE}"/"${OSFILE}""${EXTENSION}"
+	echo "${DIRECTORY}"/"${BASEVM}"/"${BASEVM}""${FILE_EXTENSION}"
 }
 
-[ $# -eq 0 ] && invalid_use
+normalize_args() {
+	expected_argc="$1"; shift
+	optstring="$1"; shift
 
-OSDIR="${XDG_CACHE_HOME:-$HOME/.cache}/sboot"
-TMPDIR="/tmp/sboot"
+	OPTIND=1
+	flags=""
+	while getopts "$optstring" option; do
+	case "$option" in
+	    "?") invalid_use -h ;;
+	    *) flags="$flags -$option $OPTARG" ;;
+	esac
+	done
 
-if [ -d "${OSDIR}" ]; then
-	mkdir -pv "${OSDIR}"
-fi
+	shift $((OPTIND - 1))
+	flags=$(printf "%s\n" $flags | sort -u)
+	check_arguments $# "$expected_argc"
 
-if [ "$#" -eq 0 ]; then
-	invalid_use
-fi
+    	printf '%s\n' $flags
+    	printf '%s\n' "$@"
+}
 
-ACTION="${1}" && shift
+vm_list() {
+	LIST_DIRECTORY="${1:-.}"
+	echo "$LIST_DIRECTORY"
 
-case "${ACTION}" in
-"fetch")
-	# FIXME: Does not check whether the installed file is an iso or not
-	check_arguments $# 2
-	check_program "curl"
-	OSNAME="${1}" && shift
- 	URI="${1}" && shift
+	VM_INDEX=1
+	for item in "$LIST_DIRECTORY"/*; do
+		[ -e "$item" ] || continue
+		name="${item##*/}"
+		echo "$VM_INDEX. $name"
+		VM_INDEX=$((VM_INDEX + 1))
 
-	OSFILE=$(get_file "${OSNAME}" .iso)
-	TMPFILE=$(get_file --temporary "${OSNAME}" .iso)
-
-	mkdir -p "$(dirname "${TMPFILE}")"
-	curl -L "${URI}" -o "${TMPFILE}"
-
-	mkdir -pv "$(dirname "${OSFILE}")"
-		mv "${TMPFILE}" "${OSFILE}"
-	;;
-"create"|"boot")
-	# FIXME: Does not check argument overflow
-	check_arguments --min $# 1
-	check_program "qemu-img"
-
-	OSNAME="${1}" && shift
-	QCOW2_FILE=$(get_file "${OSNAME}" .qcow2)
-
-	if [ -f "${QCOW2_FILE}" ]; then
-		if [ "$ACTION" = "create" ]; then
-			echo file already exists: "${QCOW2_FILE}"
+		if [ -d "$item" ]; then
+			for subitem in "$item"/*; do
+				[ -e "$subitem" ] || continue
+				subname="${subitem##*/}"
+				echo "   - $subname"
+			done
 		fi
-	else
-		qemu-img create -f qcow2 "${QCOW2_FILE}" 20G
-	fi
+	done
+}
 
-	if [ "${ACTION}" = "create" ]; then
-		exit
-	fi
+vm_install() {
+	INSTALLEXT=${1##*.}
+	INSTALLVM=${1%.*}
 
-	ISO_FILE=$(get_file "${OSNAME}" .iso)
-	if [ "${1}" = "first" ]; then
-		FLAGS="-cdrom "${ISO_FILE}" -boot d"
-		shift
-	fi
+	case "$INSTALLEXT" in
+	"qcow2"|"iso") ;;
+	*) err "invalid extension: $1" ;;
+	esac
 
-	qemu-system-x86_64 \
-	  -enable-kvm \
-	  -m 2G \
-	  -smp 2 \
-	  -drive file=${QCOW2_FILE},format=qcow2 \
-	  -net nic -net user \
-	  ${FLAGS}
+	subdir="$VMSDIR"/"$INSTALLVM"
+	mkdir -pv "$subdir"
+	mv "$1" "$subdir"
+}
+
+vm_image() {
+	[ "$1" = "-c" ] && IMGACTION="create" && shift
+	[ "$1" = "-r" ] && IMGACTION="resize" && IMGSIZE="$2" && shift 2
+
+	IMGEXT=${1##*.}
+	IMGVM=${1%.*}
+ 	TARGET_IMG=$(get_file "$IMGVM" ."$IMGEXT")
+
+	case "$IMGEXT" in
+	"qcow2") ;;
+	*) err "invalid extension: $1" ;;
+	esac
+
+	case "$IMGACTION" in
+	"resize")
+ 		check_program "qemu-img"
+
+ 		if [ -f "$TARGET_IMG" ]; then
+			qemu-img resize "$TARGET_IMG" "$IMGSIZE"
+ 		else
+			err "file not found: $TARGET_IMG"
+ 		fi
 	;;
-"remove")
-	check_arguments $# 1
-	OSDIR="${1}" && shift
-	QCOW2_FILE=$(get_file "${OSNAME}" .qcow2)
-	ISO_FILE=$(get_file "${OSNAME}" .iso)
+	"create")
+ 		check_program "qemu-img"
 
-	if [ -f "${QCOW2_FILE}" ]; then
-		unlink "${QCOW2_FILE}"
+		mkdir -pv "$(dirname "$TARGET_IMG")"
+
+ 		if [ -f "${TARGET_IMG}" ]; then
+ 			err "file already exists: ${TARGET_IMG}"
+ 		else
+ 			qemu-img create -f qcow2 "${TARGET_IMG}" 10G
+ 		fi
+	;;
+	*) err "no action specified";;
+	esac
+}
+
+vm_remove() {
+	RMFLAGS="-ri"
+	[ "$1" = "-f" ] && RMFLAGS="-rf" && shift
+	rm "$RMFLAGS" $(find "$VMSDIR" -name "$1")
+}
+
+vm_boot() {
+	DEFAULT_ARGS=1
+	[ "$1" = "-a" ] && DEFAULT_ARGS=0 && NEW_ARGS="$2" && shift 2
+	[ "$1" = "-e" ] && EXTENDED_ARGS="$2" && shift 2
+	if [ "$1" = "-i" ]; then
+		ISO_FILE=$(get_file ${2%.*} .iso) && shift 2
+		EXTENDED_ARGS="$EXTENDED_ARGS -cdrom "${ISO_FILE}" -boot d"
 	fi
 
-	if [ -f "${ISO_FILE}" ]; then
-		unlink "${ISO_FILE}"
+	QCOW2_FILE=$(get_file "$1" .qcow2)
+
+	if [ "$DEFAULT_ARGS" -eq 1 ]; then
+		QEMU_ARGS="-enable-kvm -m 2G -smp 2 -drive file=${QCOW2_FILE},format=qcow2 -net nic -net user"
+	else
+		QEMU_ARGS="$NEW_ARGS"
 	fi
 
-	if [ -d "${OSDIR}" ]; then
-		rmdir "${OSDIR}"
-	fi
-;;
-"list")
-	check_arguments $# 0
-	ls -1 "${OSDIR}" | nl
-;;
-"help") help ;;
+	QEMU_ARGS="$QEMU_ARGS $EXTENDED_ARGS"
 
-*) invalid_use -h ;;
-esac
+	qemu-system-x86_64 $QEMU_ARGS
+}
+
+main() {
+	if [ $# -eq 0 ]; then
+		invalid_use
+	fi
+
+	if [ -d "${VMSDIR}" ]; then
+		mkdir -pv "${VMSDIR}"
+	fi
+
+	ACTION="${1}" && shift
+	case "${ACTION}" in
+	"install")
+		check_arguments $# 1
+		vm_install "$1"
+	;;
+	"image")
+		args=$(normalize_args 1 "cr:" "$@")
+		[ $? -ne 0 ] && exit 1
+		vm_image $args
+	;;
+	"remove")
+		args=$(normalize_args 1 "f" "$@")
+		[ $? -ne 0 ] && exit 1
+		vm_remove $args
+	;;
+	"boot")
+		args=$(normalize_args 1 "a:e:i:" "$@")
+		[ $? -ne 0 ] && exit 1
+		vm_boot $args
+	;;
+	"list")
+		check_arguments $# 0
+		vm_list "$VMSDIR"
+	;;
+	"help")
+		check_arguments $# 0
+		help
+	;;
+	*) invalid_use ;;
+	esac
+}
+
+main "${@}"
