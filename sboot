@@ -34,7 +34,6 @@ EOF
 exit 0
 }
 
-# FIXME: Shellcheck error
 VMSDIR="$HOME/.local/share/sboot"
 
 check_arguments() {
