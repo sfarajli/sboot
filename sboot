@@ -175,13 +175,9 @@ vm_boot() {
 }
 
 main() {
-	if [ $# -eq 0 ]; then
-		invalid_use
-	fi
+	[ $# -eq 0 ] && invalid_use
 
-	if [ -d "${VMSDIR}" ]; then
-		mkdir -pv "${VMSDIR}"
-	fi
+	mkdir -pv "${VMSDIR}"
 
 	ACTION="$1" && shift
 	case "${ACTION}" in
