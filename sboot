@@ -38,12 +38,10 @@ exit 0
 VMSDIR="$HOME/.local/share/sboot"
 
 check_arguments() {
-	comparison="-ne"
-	[ "$1" = "--min" ] && comparison="-lt"
 	actual_argc="$1"; shift
 	expected_argc="$1"; shift
 
-	[ "${actual_argc}" "${comparison}" "${expected_argc}" ] && invalid_use
+	[ "${actual_argc}" -ne "${expected_argc}" ] && invalid_use
 }
 
 get_file() {
