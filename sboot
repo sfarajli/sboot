@@ -46,10 +46,10 @@ check_arguments() {
 get_file() {
 	DIRECTORY="$VMSDIR"
 	[ "$1" = "-t" ] && DIRECTORY="$TMPDIR" && shift
-	BASEVM="${1}"
-	FILE_EXTENSION="${2}"
+	BASEVM="$1"
+	FILE_EXTENSION="$2"
 
-	echo "${DIRECTORY}"/"${BASEVM}"/"${BASEVM}""${FILE_EXTENSION}"
+	echo "$DIRECTORY"/"$BASEVM"/"$BASEVM""$FILE_EXTENSION"
 }
 
 normalize_args() {
@@ -112,8 +112,8 @@ vm_image() {
 	[ "$1" = "-c" ] && IMGACTION="create" && shift
 	[ "$1" = "-r" ] && IMGACTION="resize" && IMGSIZE="$2" && shift 2
 
-	IMGEXT=${1##*.}
-	IMGVM=${1%.*}
+	IMGEXT="${1##*.}"
+	IMGVM="${1%.*}"
  	TARGET_IMG=$(get_file "$IMGVM" ."$IMGEXT")
 
 	case "$IMGEXT" in
@@ -183,7 +183,7 @@ main() {
 		mkdir -pv "${VMSDIR}"
 	fi
 
-	ACTION="${1}" && shift
+	ACTION="$1" && shift
 	case "${ACTION}" in
 	"install")
 		check_arguments $# 1
