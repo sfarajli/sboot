@@ -1,9 +1,10 @@
 #!/bin/sh
 
-. "lib_common.sh"
+progname=$(basename "${0}")
+VMSDIR="$HOME/.local/share/sboot"
 
 help() {
-cat << EOF
+cat << EOF_HELP
 ${progname}: QEMU wrapper with database
 ONLY supports x86_64
 Data directory: ~/.local/share/sboot
@@ -21,20 +22,43 @@ COMMANDS:
 
 IMAGE OPTIONS:
     -r SIZE                   Resize disk (e.g., 20G, +5G)
+    -i                        Show information
     -c                        Create file
 
 BOOT OPTIONS:
-    -i FILE                   Boot from ISO file
+    -i FILE                   Boot from ISO file (path or installed name)
     -e ARGS                   Add extra QEMU arguments (append)
     -a ARGS                   Overwrite all QEMU arguments (replace)
 
 REMOVE OPTIONS:
     -f                        Silent
-EOF
+EOF_HELP
 exit 0
 }
 
-VMSDIR="$HOME/.local/share/sboot"
+err() {
+	if [ "${1}" != "-x" ]; then
+		printf "%s: " "${progname}"
+	else
+		shift
+	fi
+
+	for line in "${@}"; do
+		echo "${line}" >&2
+	done
+	exit 1
+}
+
+invalid_use() {
+	[ "${1}" = "-h" ] && err -x "Try '${progname} -h' for help."
+	err "Invalid usage" "Try '${progname} help' for help."
+}
+
+check_program() {
+	command -v "${1}" > /dev/null 2>&1 && return 0
+	[ -n "${2}" ] && err "${2}"
+	err "${1} must be installed"
+}
 
 check_arguments() {
 	actual_argc="$1"; shift
@@ -45,171 +69,234 @@ check_arguments() {
 
 get_file() {
 	DIRECTORY="$VMSDIR"
-	[ "$1" = "-t" ] && DIRECTORY="$TMPDIR" && shift
 	BASEVM="$1"
 	FILE_EXTENSION="$2"
 
 	echo "$DIRECTORY"/"$BASEVM"/"$BASEVM""$FILE_EXTENSION"
 }
 
-normalize_args() {
-	expected_argc="$1"; shift
-	optstring="$1"; shift
-
-	OPTIND=1
-	flags=""
-	while getopts "$optstring" option; do
-	case "$option" in
-	    "?") invalid_use -h ;;
-	    *) flags="$flags -$option $OPTARG" ;;
-	esac
-	done
-
-	shift $((OPTIND - 1))
-	flags=$(printf "%s\n" $flags | sort -u)
-	check_arguments $# "$expected_argc"
-
-    	printf '%s\n' $flags
-    	printf '%s\n' "$@"
-}
-
 vm_list() {
 	LIST_DIRECTORY="${1:-.}"
-	echo "$LIST_DIRECTORY"
 
 	VM_INDEX=1
 	for item in "$LIST_DIRECTORY"/*; do
 		[ -e "$item" ] || continue
 		name="${item##*/}"
-		echo "$VM_INDEX. $name"
+		printf '%s. %s\n' "$VM_INDEX" "$name"
 		VM_INDEX=$((VM_INDEX + 1))
 
 		if [ -d "$item" ]; then
 			for subitem in "$item"/*; do
 				[ -e "$subitem" ] || continue
 				subname="${subitem##*/}"
-				echo "   - $subname"
+				printf '   - %s\n' "$subname"
 			done
 		fi
 	done
 }
 
 vm_install() {
+	[ -f "$1" ] || err "file not found: $1"
+
 	INSTALLEXT=${1##*.}
 	INSTALLVM=${1%.*}
 
 	case "$INSTALLEXT" in
-	"qcow2"|"iso") ;;
-	*) err "invalid extension: $1" ;;
+		qcow2|iso) ;;
+		*) err "invalid extension: $1" ;;
 	esac
 
 	subdir="$VMSDIR"/"$INSTALLVM"
 	mkdir -pv "$subdir"
-	mv "$1" "$subdir"
+	mv -- "$1" "$subdir/"
 }
 
 vm_image() {
-	[ "$1" = "-c" ] && IMGACTION="create" && shift
-	[ "$1" = "-r" ] && IMGACTION="resize" && IMGSIZE="$2" && shift 2
+	IMGACTION=""
+	IMGSIZE=""
 
-	IMGEXT="${1##*.}"
-	IMGVM="${1%.*}"
- 	TARGET_IMG=$(get_file "$IMGVM" ."$IMGEXT")
+	OPTIND=1
+	while getopts ":cir:" option; do
+		case "$option" in
+			c) IMGACTION="create" ;;
+			i) IMGACTION="info" ;;
+			r) IMGACTION="resize"; IMGSIZE="$OPTARG" ;;
+			:) invalid_use ;;
+			?) invalid_use -h ;;
+		esac
+	done
+	shift $((OPTIND - 1))
+	check_arguments $# 1
+
+	IMGEXT=${1##*.}
+	IMGVM=${1%.*}
 
 	case "$IMGEXT" in
-	"qcow2") ;;
-	*) err "invalid extension: $1" ;;
+		qcow2|iso) ;;
+		*) err "invalid extension: $1" ;;
 	esac
 
+	TARGET_IMG=$(get_file "$IMGVM" ".${IMGEXT}")
+
 	case "$IMGACTION" in
-	"resize")
- 		check_program "qemu-img"
+		resize)
+			check_program "qemu-img"
+			[ -n "$IMGSIZE" ] || invalid_use
 
- 		if [ -f "$TARGET_IMG" ]; then
-			qemu-img resize "$TARGET_IMG" "$IMGSIZE"
- 		else
-			err "file not found: $TARGET_IMG"
- 		fi
-	;;
-	"create")
- 		check_program "qemu-img"
+			if [ -f "$TARGET_IMG" ]; then
+				qemu-img resize "$TARGET_IMG" "$IMGSIZE"
+			else
+				err "file not found: $TARGET_IMG"
+			fi
+			;;
+		create)
+			check_program "qemu-img"
+			mkdir -pv "$(dirname "$TARGET_IMG")"
 
-		mkdir -pv "$(dirname "$TARGET_IMG")"
-
- 		if [ -f "${TARGET_IMG}" ]; then
- 			err "file already exists: ${TARGET_IMG}"
- 		else
- 			qemu-img create -f qcow2 "${TARGET_IMG}" 10G
- 		fi
-	;;
-	*) err "no action specified";;
+			if [ -e "$TARGET_IMG" ]; then
+				err "file already exists: $TARGET_IMG"
+			else
+				qemu-img create -f qcow2 "$TARGET_IMG" 10G
+			fi
+			;;
+		info)
+			check_program "qemu-img"
+			if [ -e "$TARGET_IMG" ]; then
+				qemu-img info "$TARGET_IMG"
+			else
+				err "file not found: $TARGET_IMG"
+			fi
+			;;
+		*)
+			err "no action specified"
+			;;
 	esac
 }
 
 vm_remove() {
 	RMFLAGS="-ri"
-	[ "$1" = "-f" ] && RMFLAGS="-rf" && shift
-	rm "$RMFLAGS" $(find "$VMSDIR" -name "$1")
+
+	OPTIND=1
+	while getopts ":f" option; do
+		case "$option" in
+			f) RMFLAGS="-rf" ;;
+			:) invalid_use ;;
+			?) invalid_use -h ;;
+		esac
+	done
+	shift $((OPTIND - 1))
+	check_arguments $# 1
+
+	TARGET="$1"
+	TARGET_DIR="$VMSDIR/$TARGET"
+
+	if [ -d "$TARGET_DIR" ]; then
+		rm $RMFLAGS -- "$TARGET_DIR"
+		return
+	fi
+
+	case "$TARGET" in
+		*.qcow2|*.iso)
+			BASE=${TARGET%.*}
+			EXT=.${TARGET##*.}
+			TARGET_FILE=$(get_file "$BASE" "$EXT")
+			[ -e "$TARGET_FILE" ] || err "file not found: $TARGET_FILE"
+			rm $RMFLAGS -- "$TARGET_FILE"
+			# Remove empty directory after deleting the last file.
+			if [ -d "$VMSDIR/$BASE" ] && [ -z "$(ls -A "$VMSDIR/$BASE" 2>/dev/null)" ]; then
+				rmdir -- "$VMSDIR/$BASE" 2>/dev/null || true
+			fi
+			;;
+		*)
+			err "no such VM or file: $TARGET"
+			;;
+	esac
 }
 
 vm_boot() {
 	DEFAULT_ARGS=1
-	[ "$1" = "-a" ] && DEFAULT_ARGS=0 && NEW_ARGS="$2" && shift 2
-	[ "$1" = "-e" ] && EXTENDED_ARGS="$2" && shift 2
-	if [ "$1" = "-i" ]; then
-		ISO_FILE=$(get_file ${2%.*} .iso) && shift 2
-		EXTENDED_ARGS="$EXTENDED_ARGS -cdrom "${ISO_FILE}" -boot d"
-	fi
+	NEW_ARGS=""
+	EXTENDED_ARGS=""
+	ISO_ARG=""
 
-	QCOW2_FILE=$(get_file "$1" .qcow2)
+	OPTIND=1
+	while getopts ":a:e:i:" option; do
+		case "$option" in
+			a) DEFAULT_ARGS=0; NEW_ARGS="$OPTARG" ;;
+			e) EXTENDED_ARGS="$EXTENDED_ARGS $OPTARG" ;;
+			i) ISO_ARG="$OPTARG" ;;
+			:) invalid_use ;;
+			?) invalid_use -h ;;
+		esac
+	done
+	shift $((OPTIND - 1))
+	check_arguments $# 1
 
+	check_program "qemu-system-x86_64"
+
+	VM="$1"
+	QCOW2_FILE=$(get_file "$VM" .qcow2)
+	[ -f "$QCOW2_FILE" ] || err "disk image not found: $QCOW2_FILE"
+
+	# Build argument vector.
 	if [ "$DEFAULT_ARGS" -eq 1 ]; then
-		QEMU_ARGS="-enable-kvm -m 2G -smp 2 -drive file=${QCOW2_FILE},format=qcow2 -net nic -net user"
+		set -- -enable-kvm -m 2G -smp 2 -drive "file=${QCOW2_FILE},format=qcow2" -net nic -net user
 	else
-		QEMU_ARGS="$NEW_ARGS"
+		# Split NEW_ARGS on whitespace (caller can quote the whole string).
+		set --
+		# shellcheck disable=SC2086
+		set -- $NEW_ARGS
 	fi
 
-	QEMU_ARGS="$QEMU_ARGS $EXTENDED_ARGS"
+	# If an ISO was requested, accept either an explicit path, or an installed ISO name.
+	if [ -n "$ISO_ARG" ]; then
+		if [ -f "$ISO_ARG" ]; then
+			ISO_FILE="$ISO_ARG"
+		else
+			ISO_FILE=$(get_file "${ISO_ARG%.*}" .iso)
+			[ -f "$ISO_FILE" ] || err "ISO not found: $ISO_ARG"
+		fi
+		set -- "$@" -cdrom "$ISO_FILE" -boot d
+	fi
 
-	qemu-system-x86_64 $QEMU_ARGS
+	if [ -n "$EXTENDED_ARGS" ]; then
+		# shellcheck disable=SC2086
+		set -- "$@" $EXTENDED_ARGS
+	fi
+
+	exec qemu-system-x86_64 "$@"
 }
 
 main() {
 	[ $# -eq 0 ] && invalid_use
 
-	mkdir -pv "${VMSDIR}"
+	mkdir -pv "$VMSDIR"
 
-	ACTION="$1" && shift
-	case "${ACTION}" in
-	"install")
-		check_arguments $# 1
-		vm_install "$1"
-	;;
-	"image")
-		args=$(normalize_args 1 "cr:" "$@")
-		[ $? -ne 0 ] && exit 1
-		vm_image $args
-	;;
-	"remove")
-		args=$(normalize_args 1 "f" "$@")
-		[ $? -ne 0 ] && exit 1
-		vm_remove $args
-	;;
-	"boot")
-		args=$(normalize_args 1 "a:e:i:" "$@")
-		[ $? -ne 0 ] && exit 1
-		vm_boot $args
-	;;
-	"list")
-		check_arguments $# 0
-		vm_list "$VMSDIR"
-	;;
-	"help")
-		check_arguments $# 0
-		help
-	;;
-	*) invalid_use ;;
+	ACTION="$1"; shift
+	case "$ACTION" in
+		install)
+			check_arguments $# 1
+			vm_install "$1"
+			;;
+		image)
+			vm_image "$@"
+			;;
+		remove)
+			vm_remove "$@"
+			;;
+		boot)
+			vm_boot "$@"
+			;;
+		list)
+			check_arguments $# 0
+			vm_list "$VMSDIR"
+			;;
+		help)
+			check_arguments $# 0
+			help
+			;;
+		*) invalid_use ;;
 	esac
 }
 
-main "${@}"
+main "$@"
